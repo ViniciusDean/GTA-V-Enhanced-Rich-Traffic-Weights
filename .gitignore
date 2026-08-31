@@ -1,0 +1,8 @@
+/build/
+/.vs/
+*.log
+*.user
+*.suo
+*.zip
+ScriptHookV_SDK*/
+
