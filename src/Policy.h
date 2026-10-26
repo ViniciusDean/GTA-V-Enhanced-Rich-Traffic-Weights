@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <random>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -11,16 +12,24 @@ namespace richtraffic {
 
 using ModelHash = std::uint32_t;
 
-struct SlotConfig {
-    std::size_t daily = 109;
-    std::size_t luxury = 35;
-    std::size_t sport = 28;
+// Probability (0..1) that each model of a tier is allowed to spawn in a zone.
+struct ZoneProfile {
+    float daily = 1.0f;
+    float luxury = 1.0f;
+    float sport = 1.0f;
+    float exotic = 1.0f;
 };
+
+using ZoneTable = std::unordered_map<std::string, ZoneProfile>;
+
+// Per-model multiplier on top of the tier probability (0 = never, 1 = neutral).
+using ModelWeights = std::unordered_map<ModelHash, float>;
 
 struct Catalog {
     std::vector<ModelHash> daily;
     std::vector<ModelHash> luxury;
     std::vector<ModelHash> sport;
+    std::vector<ModelHash> exotic;
 };
 
 struct Selection {
@@ -32,19 +41,6 @@ struct RepeatObservation {
     ModelHash model = 0;
     std::size_t count = 0;
     float nearestDistanceSquared = 0.0f;
-};
-
-class SportRotation {
-public:
-    SportRotation(std::vector<ModelHash> source, std::uint32_t seed);
-    std::vector<ModelHash> Next(std::size_t count);
-
-private:
-    void Refill();
-    std::vector<ModelHash> source_;
-    std::vector<ModelHash> bag_;
-    std::size_t cursor_ = 0;
-    std::mt19937 random_;
 };
 
 enum class CooldownEventType { Started, Renewed, Expired, Evicted };
@@ -72,13 +68,17 @@ private:
 
 ModelHash HashModelName(std::string_view name);
 Catalog BuildCatalog();
-bool ValidateCatalog(const Catalog& catalog, const SlotConfig& slots);
-Selection BuildSelection(const Catalog& catalog, const SlotConfig& slots,
-                         const std::vector<ModelHash>& activeSports);
+bool ValidateCatalog(const Catalog& catalog);
+float ClampProbability(float value);
+// Scales the sport and exotic tiers (night boost, rain penalty), capped at 1.
+ZoneProfile ScaleFastTiers(ZoneProfile profile, float multiplier);
+ZoneTable BuildDefaultZones();
+const ZoneProfile* FindZoneProfile(const ZoneTable& zones, std::string_view zone);
+Selection BuildWeightedSelection(const Catalog& catalog, const ZoneProfile& profile,
+                                 const ModelWeights& weights, std::mt19937& random);
 std::vector<RepeatObservation> SelectRepeatCandidates(
     std::vector<RepeatObservation> observations, std::size_t repeatLimit,
     std::size_t maxModels);
 bool IsPassengerClass(int vehicleClass);
-bool IsControlledZone(std::string_view zone);
 
 } // namespace richtraffic

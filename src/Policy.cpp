@@ -16,10 +16,6 @@ std::vector<ModelHash> HashRange(const Range& names) {
     return result;
 }
 
-bool Contains(const std::vector<ModelHash>& values, ModelHash model) {
-    return std::find(values.begin(), values.end(), model) != values.end();
-}
-
 } // namespace
 
 ModelHash HashModelName(std::string_view name) {
@@ -50,48 +46,44 @@ ModelHash HashModelName(std::string_view name) {
 }
 
 Catalog BuildCatalog() {
-    return {HashRange(kDailyModels), HashRange(kLuxuryModels), HashRange(kSportModels)};
+    return {HashRange(kDailyModels), HashRange(kLuxuryModels), HashRange(kSportModels),
+            HashRange(kExoticModels)};
 }
 
-bool ValidateCatalog(const Catalog& catalog, const SlotConfig& slots) {
-    if (catalog.daily.size() != 109 || catalog.luxury.size() != 35 || catalog.sport.size() != 98) return false;
-    if (slots.daily > catalog.daily.size() || slots.luxury > catalog.luxury.size() || slots.sport > catalog.sport.size()) return false;
-    if (slots.daily == 0 || slots.luxury == 0 || slots.sport == 0) return false;
-
+bool ValidateCatalog(const Catalog& catalog) {
+    if (catalog.daily.empty() || catalog.luxury.empty() || catalog.sport.empty() ||
+        catalog.exotic.empty()) return false;
     std::unordered_set<ModelHash> unique;
-    for (const auto* group : {&catalog.daily, &catalog.luxury, &catalog.sport}) {
+    for (const auto* group : {&catalog.daily, &catalog.luxury, &catalog.sport, &catalog.exotic}) {
         for (const auto model : *group) {
             if (model == 0 || !unique.insert(model).second) return false;
         }
     }
-    return unique.size() == 242;
+    return true;
 }
 
-SportRotation::SportRotation(std::vector<ModelHash> source, std::uint32_t seed)
-    : source_(std::move(source)), random_(seed) {
-    if (source_.empty()) throw std::invalid_argument("sport rotation source cannot be empty");
-    const std::unordered_set<ModelHash> unique(source_.begin(), source_.end());
-    if (unique.size() != source_.size()) throw std::invalid_argument("sport rotation source must be unique");
-    Refill();
+float ClampProbability(float value) {
+    if (!(value > 0.0f)) return 0.0f;
+    return value > 1.0f ? 1.0f : value;
 }
 
-void SportRotation::Refill() {
-    bag_ = source_;
-    std::shuffle(bag_.begin(), bag_.end(), random_);
-    cursor_ = 0;
+ZoneProfile ScaleFastTiers(ZoneProfile profile, float multiplier) {
+    profile.sport = ClampProbability(profile.sport * multiplier);
+    profile.exotic = ClampProbability(profile.exotic * multiplier);
+    return profile;
 }
 
-std::vector<ModelHash> SportRotation::Next(std::size_t count) {
-    if (count == 0 || count > source_.size()) throw std::invalid_argument("invalid sport rotation count");
-    std::vector<ModelHash> result;
-    result.reserve(count);
-    std::unordered_set<ModelHash> selected;
-    while (result.size() < count) {
-        if (cursor_ >= bag_.size()) Refill();
-        const ModelHash model = bag_[cursor_++];
-        if (selected.insert(model).second) result.push_back(model);
+ZoneTable BuildDefaultZones() {
+    ZoneTable zones;
+    for (const auto& zone : kDefaultZones) {
+        zones[std::string(zone.name)] = {zone.daily, zone.luxury, zone.sport, zone.exotic};
     }
-    return result;
+    return zones;
+}
+
+const ZoneProfile* FindZoneProfile(const ZoneTable& zones, std::string_view zone) {
+    const auto found = zones.find(std::string(zone));
+    return found == zones.end() ? nullptr : &found->second;
 }
 
 RepeatCooldowns::RepeatCooldowns(std::size_t maxModels) : maxModels_(maxModels) {
@@ -147,22 +139,44 @@ const std::unordered_map<ModelHash, std::uint64_t>& RepeatCooldowns::Entries() c
 
 void RepeatCooldowns::Clear() { entries_.clear(); }
 
-Selection BuildSelection(const Catalog& catalog, const SlotConfig& slots,
-                         const std::vector<ModelHash>& activeSports) {
-    if (!ValidateCatalog(catalog, slots)) throw std::invalid_argument("invalid catalog or slot configuration");
-    if (activeSports.size() != slots.sport) throw std::invalid_argument("sport selection has wrong size");
+namespace {
 
-    Selection result;
-    result.active.reserve(slots.daily + slots.luxury + slots.sport);
-    result.suppressed.reserve(242 - result.active.size());
-    result.active.insert(catalog.daily.begin(), catalog.daily.begin() + static_cast<std::ptrdiff_t>(slots.daily));
-    result.active.insert(catalog.luxury.begin(), catalog.luxury.begin() + static_cast<std::ptrdiff_t>(slots.luxury));
-    for (const ModelHash model : activeSports) {
-        if (!Contains(catalog.sport, model) || !result.active.insert(model).second) {
-            throw std::invalid_argument("sport selection contains invalid or duplicate model");
-        }
+// Each model is allowed with the tier probability; at least one model per tier
+// always stays active so a zone never runs out of a whole tier.
+float ModelWeight(const ModelWeights& weights, ModelHash model) {
+    const auto found = weights.find(model);
+    return found == weights.end() ? 1.0f : found->second;
+}
+
+void RollTier(const std::vector<ModelHash>& models, float probability, const ModelWeights& weights,
+              std::mt19937& random, Selection& result) {
+    std::uniform_real_distribution<float> roll(0.0f, 1.0f);
+    std::vector<ModelHash> eligible;
+    std::size_t activeBefore = result.active.size();
+    for (const ModelHash model : models) {
+        const float chance = ClampProbability(probability * ModelWeight(weights, model));
+        if (chance <= 0.0f) continue;
+        eligible.push_back(model);
+        if (roll(random) < chance) result.active.insert(model);
     }
-    for (const auto* group : {&catalog.daily, &catalog.luxury, &catalog.sport}) {
+    // Models weighted to 0 are banned, so the fallback only picks from the rest.
+    if (result.active.size() == activeBefore && probability > 0.0f && !eligible.empty()) {
+        std::uniform_int_distribution<std::size_t> pick(0, eligible.size() - 1);
+        result.active.insert(eligible[pick(random)]);
+    }
+}
+
+} // namespace
+
+Selection BuildWeightedSelection(const Catalog& catalog, const ZoneProfile& profile,
+                                 const ModelWeights& weights, std::mt19937& random) {
+    if (!ValidateCatalog(catalog)) throw std::invalid_argument("invalid catalog");
+    Selection result;
+    RollTier(catalog.daily, profile.daily, weights, random, result);
+    RollTier(catalog.luxury, profile.luxury, weights, random, result);
+    RollTier(catalog.sport, profile.sport, weights, random, result);
+    RollTier(catalog.exotic, profile.exotic, weights, random, result);
+    for (const auto* group : {&catalog.daily, &catalog.luxury, &catalog.sport, &catalog.exotic}) {
         for (const ModelHash model : *group) {
             if (result.active.count(model) == 0) result.suppressed.insert(model);
         }
@@ -193,10 +207,6 @@ std::vector<RepeatObservation> SelectRepeatCandidates(
 
 bool IsPassengerClass(int vehicleClass) {
     return (vehicleClass >= 0 && vehicleClass <= 7) || vehicleClass == 9;
-}
-
-bool IsControlledZone(std::string_view zone) {
-    return std::find(kControlledZones.begin(), kControlledZones.end(), zone) != kControlledZones.end();
 }
 
 } // namespace richtraffic
