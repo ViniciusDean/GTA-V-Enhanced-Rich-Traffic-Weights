@@ -128,3 +128,21 @@ This is an unofficial fan-made mod. It is not affiliated with or endorsed by Roc
 
 Mod de tráfego para GTA V Enhanced em Story Mode offline. Ele amplia a variedade de veículos DLC, mantém carros cotidianos predominantes, controla esportivos por rotação e bloqueia temporariamente novos spawns de modelos que começam a se repetir perto do jogador. A instalação pronta está na seção [Releases](../../releases).
 
+
+## v1.4.0
+
+- New Exotic tier: 44 supercars and hypercars split from Sport (now 68), with their own lower chance per zone.
+- Per-model multipliers in the `[Models]` INI section (`spawnname=0..10`; 0 bans a model).
+- Rain, thunder and snow scale the sport and exotic chances by `RainFastMultiplier` (default 0.5).
+- `ReloadKey` (default F11) re-reads the INI in game; an invalid INI keeps the previous settings.
+- Logs show game display names for vanilla models instead of `hash_XXXXXXXX`, and are now fully in English.
+- The debug overlay shows the current daily/luxury/sport/exotic chances.
+
+## v1.3.0
+
+- Catalog grew to 266 models (116 daily / 38 luxury / 112 sport): 2023-2026 DLC cars such as coquette6, jester5, horus, pipistrello, fmj2, dominator9/10, warden. They are also added to `veh_rich` in `popgroups.ymt.pso.xml`.
+- Real weights: each zone has a probability per tier (daily/luxury/sport). Models are re-rolled every `SportCycleSeconds` and on entering a new zone; at least one model per tier always stays active.
+- 28 built-in zones (rich and poor) that can be overridden or extended in the INI via `[Zone.NAME]` sections with `Daily`, `Luxury`, `Sport` (0.0-1.0).
+- Night boost for sports (`NightSportMultiplier`, `NightStartHour`, `NightEndHour`).
+- An invalid INI now falls back to built-in defaults instead of disabling the plugin.
+- Removed `DailySlots`, `LuxurySlots` and `SportSlots`.

@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -29,7 +30,11 @@ struct RuntimeConfig {
     bool enabled = true;
     DWORD zonePollMs = 1000;
     DWORD sportCycleMs = 30000;
-    SlotConfig slots{};
+    float nightSportMultiplier = 1.5f;
+    int nightStartHour = 21;
+    int nightEndHour = 5;
+    float rainFastMultiplier = 0.5f;
+    DWORD reloadKey = VK_F11;
     bool antiRepeatEnabled = true;
     DWORD repeatScanMs = 5000;
     float repeatRadiusMeters = 180.0f;
@@ -45,10 +50,17 @@ struct RuntimeConfig {
 HMODULE g_module = nullptr;
 std::atomic<bool> g_toggleRequested{false};
 DWORD g_toggleKey = VK_F10;
+std::atomic<bool> g_reloadRequested{false};
+DWORD g_reloadKey = VK_F11;
+ModelWeights g_modelWeights;
+ZoneProfile g_lastProfile{};
 std::filesystem::path g_directory;
 std::filesystem::path g_logPath;
 Catalog g_catalog;
-std::unique_ptr<SportRotation> g_sportRotation;
+std::mt19937 g_random{std::random_device{}()};
+ZoneTable g_zones;
+std::string g_rolledZone;
+constexpr const char* kVersion = "1.4.0";
 Selection g_selection;
 std::unordered_map<ModelHash, std::string> g_modelNames;
 std::unordered_map<ModelHash, bool> g_suppressionState;
@@ -89,6 +101,15 @@ void AddModelNames(const Range& names) {
 std::string ModelName(ModelHash model) {
     const auto found = g_modelNames.find(model);
     if (found != g_modelNames.end()) return found->second;
+    // Vanilla traffic models are not in the catalog: ask the game for their name.
+    const char* label = VEHICLE::GET_DISPLAY_NAME_FROM_VEHICLE_MODEL(model);
+    if (label && *label && std::string_view(label) != "CARNOTFOUND") {
+        std::string name(label);
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+        g_modelNames[model] = name;
+        return name;
+    }
     std::ostringstream stream;
     stream << "hash_" << std::hex << std::uppercase << std::setw(8) << std::setfill('0') << model;
     return stream.str();
@@ -120,20 +141,23 @@ bool ReadBool(const std::filesystem::path& iniPath, const char* key, bool defaul
     throw std::invalid_argument(std::string(key) + " must be true or false");
 }
 
-DWORD ParseToggleKey(const std::filesystem::path& iniPath) {
+// Accepts F1..F12; "None" (only when allowNone) disables the key.
+DWORD ParseKey(const std::filesystem::path& iniPath, const char* name, const char* defaultValue,
+               bool allowNone) {
     char value[32]{};
-    GetPrivateProfileStringA("RichTrafficWeights", "ToggleKey", "F10", value,
+    GetPrivateProfileStringA("RichTrafficWeights", name, defaultValue, value,
                              static_cast<DWORD>(std::size(value)), iniPath.string().c_str());
     std::string key(value);
     std::transform(key.begin(), key.end(), key.begin(),
                    [](unsigned char character) { return static_cast<char>(std::toupper(character)); });
+    if (allowNone && key == "NONE") return 0;
     if (key.size() >= 2 && key[0] == 'F') {
         try {
             const int number = std::stoi(key.substr(1));
             if (number >= 1 && number <= 12) return static_cast<DWORD>(VK_F1 + number - 1);
         } catch (...) {}
     }
-    throw std::invalid_argument("ToggleKey must be F1 through F12");
+    throw std::invalid_argument(std::string(name) + " must be F1 through F12");
 }
 
 RuntimeConfig LoadConfig(const std::filesystem::path& iniPath) {
@@ -141,20 +165,26 @@ RuntimeConfig LoadConfig(const std::filesystem::path& iniPath) {
     config.enabled = ReadBool(iniPath, "Enabled", true);
     config.zonePollMs = static_cast<DWORD>(ReadInt(iniPath, "ZonePollMs", 1000));
     config.sportCycleMs = static_cast<DWORD>(ReadInt(iniPath, "SportCycleSeconds", 30)) * 1000;
-    config.slots.daily = static_cast<std::size_t>(ReadInt(iniPath, "DailySlots", 109));
-    config.slots.luxury = static_cast<std::size_t>(ReadInt(iniPath, "LuxurySlots", 35));
-    config.slots.sport = static_cast<std::size_t>(ReadInt(iniPath, "SportSlots", 28));
+    config.nightSportMultiplier = ReadFloat(iniPath, "NightSportMultiplier", 1.5f);
+    config.nightStartHour = ReadInt(iniPath, "NightStartHour", 21);
+    config.nightEndHour = ReadInt(iniPath, "NightEndHour", 5);
     config.antiRepeatEnabled = ReadBool(iniPath, "AntiRepeatEnabled", true);
     config.repeatScanMs = static_cast<DWORD>(ReadInt(iniPath, "RepeatScanMs", 5000));
     config.repeatRadiusMeters = ReadFloat(iniPath, "RepeatRadiusMeters", 180.0f);
     config.repeatLimit = static_cast<std::size_t>(ReadInt(iniPath, "RepeatLimit", 2));
     config.repeatCooldownMs = static_cast<DWORD>(ReadInt(iniPath, "RepeatCooldownSeconds", 90)) * 1000;
     config.maxRepeatCooldownModels = static_cast<std::size_t>(ReadInt(iniPath, "MaxRepeatCooldownModels", 32));
-    config.toggleKey = ParseToggleKey(iniPath);
+    config.toggleKey = ParseKey(iniPath, "ToggleKey", "F10", false);
+    config.reloadKey = ParseKey(iniPath, "ReloadKey", "F11", true);
+    config.rainFastMultiplier = ReadFloat(iniPath, "RainFastMultiplier", 0.5f);
     config.debugOverlay = ReadBool(iniPath, "DebugOverlay", false);
     config.debugTelemetry = ReadBool(iniPath, "DebugTelemetry", false);
     config.logAntiRepeat = ReadBool(iniPath, "LogAntiRepeat", true);
 
+    if (config.nightSportMultiplier < 0.0f || config.nightSportMultiplier > 10.0f) throw std::invalid_argument("NightSportMultiplier must be 0..10");
+    if (config.rainFastMultiplier < 0.0f || config.rainFastMultiplier > 2.0f) throw std::invalid_argument("RainFastMultiplier must be 0..2");
+    if (config.reloadKey == config.toggleKey) throw std::invalid_argument("ReloadKey must differ from ToggleKey");
+    if (config.nightStartHour < 0 || config.nightStartHour > 23 || config.nightEndHour < 0 || config.nightEndHour > 23) throw std::invalid_argument("Night hours must be 0..23");
     if (config.zonePollMs < 250 || config.zonePollMs > 10000) throw std::invalid_argument("ZonePollMs must be 250..10000");
     if (config.sportCycleMs < 10000 || config.sportCycleMs > 600000) throw std::invalid_argument("SportCycleSeconds must be 10..600");
     if (config.repeatScanMs < 1000 || config.repeatScanMs > 60000) throw std::invalid_argument("RepeatScanMs must be 1000..60000");
@@ -163,6 +193,82 @@ RuntimeConfig LoadConfig(const std::filesystem::path& iniPath) {
     if (config.repeatCooldownMs < 10000 || config.repeatCooldownMs > 600000) throw std::invalid_argument("RepeatCooldownSeconds must be 10..600");
     if (config.maxRepeatCooldownModels < 1 || config.maxRepeatCooldownModels > 100) throw std::invalid_argument("MaxRepeatCooldownModels must be 1..100");
     return config;
+}
+
+float ReadZoneFloat(const std::filesystem::path& iniPath, const std::string& section,
+                    const char* key, float defaultValue) {
+    char defaultBuffer[32]{};
+    char value[32]{};
+    sprintf_s(defaultBuffer, "%.3f", defaultValue);
+    GetPrivateProfileStringA(section.c_str(), key, defaultBuffer, value,
+                             static_cast<DWORD>(std::size(value)), iniPath.string().c_str());
+    float parsed = 0.0f;
+    try { parsed = std::stof(value); }
+    catch (...) { throw std::invalid_argument(section + " " + key + " must be numeric"); }
+    if (parsed < 0.0f || parsed > 1.0f) throw std::invalid_argument(section + " " + key + " must be 0..1");
+    return parsed;
+}
+
+// Starts from the built-in zone table and overlays every [Zone.NAME] INI section,
+// so zones can be retuned or added without rebuilding the plugin.
+ZoneTable LoadZones(const std::filesystem::path& iniPath) {
+    ZoneTable zones = BuildDefaultZones();
+    std::vector<char> buffer(16384);
+    const DWORD length = GetPrivateProfileSectionNamesA(
+        buffer.data(), static_cast<DWORD>(buffer.size()), iniPath.string().c_str());
+    for (DWORD offset = 0; offset < length;) {
+        const std::string section(buffer.data() + offset);
+        offset += static_cast<DWORD>(section.size()) + 1;
+        if (section.size() <= 5 || section.compare(0, 5, "Zone.") != 0) continue;
+        std::string name = section.substr(5);
+        std::transform(name.begin(), name.end(), name.begin(),
+                       [](unsigned char character) { return static_cast<char>(std::toupper(character)); });
+        ZoneProfile profile = zones.count(name) ? zones[name] : ZoneProfile{};
+        profile.daily = ReadZoneFloat(iniPath, section, "Daily", profile.daily);
+        profile.luxury = ReadZoneFloat(iniPath, section, "Luxury", profile.luxury);
+        profile.sport = ReadZoneFloat(iniPath, section, "Sport", profile.sport);
+        profile.exotic = ReadZoneFloat(iniPath, section, "Exotic", profile.exotic);
+        zones[name] = profile;
+    }
+    return zones;
+}
+
+// [Models] holds spawnname=multiplier lines (0 bans a model, 2 doubles its chance).
+ModelWeights LoadModelWeights(const std::filesystem::path& iniPath) {
+    ModelWeights weights;
+    std::vector<char> buffer(32768);
+    const DWORD length = GetPrivateProfileSectionA(
+        "Models", buffer.data(), static_cast<DWORD>(buffer.size()), iniPath.string().c_str());
+    for (DWORD offset = 0; offset < length;) {
+        const std::string line(buffer.data() + offset);
+        offset += static_cast<DWORD>(line.size()) + 1;
+        if (line.empty() || line[0] == ';') continue;
+        const auto equals = line.find('=');
+        if (equals == std::string::npos || equals == 0) throw std::invalid_argument("[Models] line without '=': " + line);
+        const std::string name = line.substr(0, equals);
+        float value = 0.0f;
+        try { value = std::stof(line.substr(equals + 1)); }
+        catch (...) { throw std::invalid_argument("[Models] " + name + " must be numeric"); }
+        if (value < 0.0f || value > 10.0f) throw std::invalid_argument("[Models] " + name + " must be 0..10");
+        weights[HashModelName(name)] = value;
+    }
+    return weights;
+}
+
+bool IsWetWeather() {
+    static const ModelHash wet[] = {
+        HashModelName("RAIN"), HashModelName("THUNDER"), HashModelName("CLEARING"),
+        HashModelName("SNOW"), HashModelName("BLIZZARD"), HashModelName("SNOWLIGHT"),
+        HashModelName("XMAS")};
+    const ModelHash weather = static_cast<ModelHash>(GAMEPLAY::_GET_CURRENT_WEATHER_TYPE());
+    return std::find(std::begin(wet), std::end(wet), weather) != std::end(wet);
+}
+
+bool IsNightHour(const RuntimeConfig& config, int hour) {
+    if (config.nightStartHour <= config.nightEndHour) {
+        return hour >= config.nightStartHour && hour < config.nightEndHour;
+    }
+    return hour >= config.nightStartHour || hour < config.nightEndHour;
 }
 
 void SetSuppressed(ModelHash model, bool suppressed) {
@@ -177,12 +283,13 @@ bool IsRichCatalogModel(ModelHash model) {
     const auto contains = [model](const std::vector<ModelHash>& values) {
         return std::find(values.begin(), values.end(), model) != values.end();
     };
-    return contains(g_catalog.daily) || contains(g_catalog.luxury) || contains(g_catalog.sport);
+    return contains(g_catalog.daily) || contains(g_catalog.luxury) || contains(g_catalog.sport) ||
+           contains(g_catalog.exotic);
 }
 
 void ReconcileSuppressions(bool controlled, ULONGLONG now) {
     std::unordered_set<ModelHash> models;
-    for (const auto* group : {&g_catalog.daily, &g_catalog.luxury, &g_catalog.sport}) {
+    for (const auto* group : {&g_catalog.daily, &g_catalog.luxury, &g_catalog.sport, &g_catalog.exotic}) {
         models.insert(group->begin(), group->end());
     }
     for (const auto& state : g_suppressionState) models.insert(state.first);
@@ -206,7 +313,7 @@ void ReleaseAll(const std::string& reason) {
         ++released;
     }
     if (released > 0 || (g_repeatCooldowns && g_repeatCooldowns->Size() > 0)) {
-        Log(reason + ": " + std::to_string(released) + " modelos liberados.");
+        Log(reason + ": " + std::to_string(released) + " models released.");
     }
     if (g_repeatCooldowns) g_repeatCooldowns->Clear();
     g_selection = {};
@@ -214,20 +321,24 @@ void ReleaseAll(const std::string& reason) {
     g_currentZone.clear();
 }
 
-void ApplySportRotation(const RuntimeConfig& config, const std::string& zone, ULONGLONG now) {
-    const auto sports = g_sportRotation->Next(config.slots.sport);
-    g_selection = BuildSelection(g_catalog, config.slots, sports);
+void ApplyRoll(const RuntimeConfig& config, const ZoneProfile& base, const std::string& zone,
+               ULONGLONG now) {
+    const bool night = IsNightHour(config, TIME::GET_CLOCK_HOURS());
+    const bool wet = IsWetWeather();
+    float fastMultiplier = 1.0f;
+    if (night) fastMultiplier *= config.nightSportMultiplier;
+    if (wet) fastMultiplier *= config.rainFastMultiplier;
+    const ZoneProfile profile = ScaleFastTiers(base, fastMultiplier);
+    g_lastProfile = profile;
+    g_selection = BuildWeightedSelection(g_catalog, profile, g_modelWeights, g_random);
     ReconcileSuppressions(true, now);
-
-    std::ostringstream names;
-    for (std::size_t index = 0; index < sports.size(); ++index) {
-        if (index > 0) names << ',';
-        names << ModelName(sports[index]);
-    }
-    Log("Rotacao v1.1 em " + zone + ": ativos=" + std::to_string(g_selection.active.size()) +
-        " (daily=" + std::to_string(config.slots.daily) + ", luxury=" +
-        std::to_string(config.slots.luxury) + ", sport=" + std::to_string(config.slots.sport) +
-        "); esportivos=" + names.str());
+    std::ostringstream text;
+    text << std::fixed << std::setprecision(2) << "Roll in " << zone << (night ? " (night)" : "")
+         << (wet ? " (wet)" : "") << ": active=" << g_selection.active.size()
+         << " suppressed=" << g_selection.suppressed.size()
+         << " p(daily/luxury/sport/exotic)=" << profile.daily << '/' << profile.luxury << '/'
+         << profile.sport << '/' << profile.exotic;
+    Log(text.str());
 }
 
 void ScanAntiRepeat(const RuntimeConfig& config, Ped player, const Vector3& playerPosition,
@@ -276,19 +387,19 @@ void ScanAntiRepeat(const RuntimeConfig& config, Ped player, const Vector3& play
             case CooldownEventType::Started: {
                 const auto found = observed.find(event.model);
                 const std::size_t count = found == observed.end() ? 0 : found->second.count;
-                Log("Anti-repeat iniciado: " + ModelName(event.model) + " x" +
-                    std::to_string(count) + " em " +
+                Log("Anti-repeat started: " + ModelName(event.model) + " x" +
+                    std::to_string(count) + " within " +
                     std::to_string(static_cast<int>(config.repeatRadiusMeters)) + "m");
                 break;
             }
             case CooldownEventType::Renewed:
-                Log("Anti-repeat renovado: " + ModelName(event.model));
+                Log("Anti-repeat renewed: " + ModelName(event.model));
                 break;
             case CooldownEventType::Expired:
-                Log("Anti-repeat finalizado: " + ModelName(event.model));
+                Log("Anti-repeat ended: " + ModelName(event.model));
                 break;
             case CooldownEventType::Evicted:
-                Log("Anti-repeat substituido por prioridade: " + ModelName(event.model));
+                Log("Anti-repeat evicted by priority: " + ModelName(event.model));
                 break;
             }
         }
@@ -296,7 +407,7 @@ void ScanAntiRepeat(const RuntimeConfig& config, Ped player, const Vector3& play
     ReconcileSuppressions(controlled, now);
 }
 
-enum class Category { Daily, Luxury, Sport, Other };
+enum class Category { Daily, Luxury, Sport, Exotic, Other };
 
 Category Categorize(ModelHash model) {
     const auto contains = [model](const std::vector<ModelHash>& values) {
@@ -305,13 +416,14 @@ Category Categorize(ModelHash model) {
     if (contains(g_catalog.daily)) return Category::Daily;
     if (contains(g_catalog.luxury)) return Category::Luxury;
     if (contains(g_catalog.sport)) return Category::Sport;
+    if (contains(g_catalog.exotic)) return Category::Exotic;
     return Category::Other;
 }
 
 void RecordTelemetry(const RuntimeConfig& config, const Vector3& playerPosition) {
     std::vector<int> vehicles(2048);
     const int count = worldGetAllVehicles(vehicles.data(), static_cast<int>(vehicles.size()));
-    int daily = 0, luxury = 0, sport = 0, other = 0, nearby = 0;
+    int daily = 0, luxury = 0, sport = 0, exotic = 0, other = 0, nearby = 0;
     const float radiusSquared = config.repeatRadiusMeters * config.repeatRadiusMeters;
     for (int index = 0; index < count; ++index) {
         const Entity vehicle = vehicles[static_cast<std::size_t>(index)];
@@ -326,12 +438,14 @@ void RecordTelemetry(const RuntimeConfig& config, const Vector3& playerPosition)
         case Category::Daily: ++daily; break;
         case Category::Luxury: ++luxury; break;
         case Category::Sport: ++sport; break;
+        case Category::Exotic: ++exotic; break;
         default: ++other; break;
         }
     }
-    Log("Telemetria " + std::to_string(static_cast<int>(config.repeatRadiusMeters)) + "m: total=" +
+    Log("Telemetry " + std::to_string(static_cast<int>(config.repeatRadiusMeters)) + "m: total=" +
         std::to_string(nearby) + ", daily=" + std::to_string(daily) + ", luxury=" +
-        std::to_string(luxury) + ", sport=" + std::to_string(sport) + ", other=" +
+        std::to_string(luxury) + ", sport=" + std::to_string(sport) + ", exotic=" +
+        std::to_string(exotic) + ", other=" +
         std::to_string(other) + ", cooldowns=" +
         std::to_string(g_repeatCooldowns ? g_repeatCooldowns->Size() : 0));
 }
@@ -339,10 +453,14 @@ void RecordTelemetry(const RuntimeConfig& config, const Vector3& playerPosition)
 void DrawOverlay(const RuntimeConfig& config) {
     if (!config.debugOverlay) return;
     std::ostringstream text;
-    text << "RichTrafficWeights v1.1 " << (g_runtimeEnabled ? "ON" : "OFF")
-         << " | zona: " << (g_currentZone.empty() ? "?" : g_currentZone)
+    text << "RichTrafficWeights v" << kVersion << " " << (g_runtimeEnabled ? "ON" : "OFF")
+         << " | zone: " << (g_currentZone.empty() ? "?" : g_currentZone)
          << " | rich: " << (g_insideZone ? g_selection.active.size() : 0)
          << " | cooldowns: " << (g_repeatCooldowns ? g_repeatCooldowns->Size() : 0);
+    if (g_insideZone) {
+        text << std::fixed << std::setprecision(2) << " | p " << g_lastProfile.daily << '/'
+             << g_lastProfile.luxury << '/' << g_lastProfile.sport << '/' << g_lastProfile.exotic;
+    }
     std::string value = text.str();
     UI::SET_TEXT_FONT(0);
     UI::SET_TEXT_SCALE(0.0f, 0.30f);
@@ -358,7 +476,9 @@ void DrawOverlay(const RuntimeConfig& config) {
 void SetPluginModule(HMODULE module) { g_module = module; }
 
 void OnKeyboard(DWORD key, WORD, BYTE, BOOL, BOOL, BOOL wasDownBefore, BOOL isUpNow) {
-    if (g_configValid && key == g_toggleKey && isUpNow && wasDownBefore) g_toggleRequested.store(true);
+    if (!g_configValid || !isUpNow || !wasDownBefore) return;
+    if (key == g_toggleKey) g_toggleRequested.store(true);
+    else if (g_reloadKey != 0 && key == g_reloadKey) g_reloadRequested.store(true);
 }
 
 void ScriptMain() {
@@ -369,23 +489,38 @@ void ScriptMain() {
     AddModelNames(kDailyModels);
     AddModelNames(kLuxuryModels);
     AddModelNames(kSportModels);
+    AddModelNames(kExoticModels);
 
     RuntimeConfig config;
+    g_zones = BuildDefaultZones();
     try {
         config = LoadConfig(iniPath);
-        if (!ValidateCatalog(g_catalog, config.slots)) throw std::invalid_argument("catalog or slot counts invalid");
-        g_sportRotation = std::make_unique<SportRotation>(
-            g_catalog.sport, static_cast<std::uint32_t>(GetTickCount64()));
+        g_zones = LoadZones(iniPath);
+        g_modelWeights = LoadModelWeights(iniPath);
+    } catch (const std::exception& error) {
+        // A bad INI value must not kill the mod: fall back to the built-in defaults.
+        Log(std::string("Invalid configuration, using built-in defaults: ") + error.what());
+        config = RuntimeConfig{};
+        g_zones = BuildDefaultZones();
+        g_modelWeights.clear();
+    }
+    try {
+        if (!ValidateCatalog(g_catalog)) throw std::invalid_argument("catalog invalid");
         g_repeatCooldowns = std::make_unique<RepeatCooldowns>(config.maxRepeatCooldownModels);
         g_runtimeEnabled = config.enabled;
         g_toggleKey = config.toggleKey;
-        Log("Inicializado v1.2.0; rich=109/35/98; ativos=109/35/28; vivanite2=REMOVIDO; anti-repeat global=" +
-            std::string(config.antiRepeatEnabled ? "ON" : "OFF") + " limite=" +
-            std::to_string(config.repeatLimit) + " raio=" +
+        g_reloadKey = config.reloadKey;
+        Log("Initialized v" + std::string(kVersion) + "; catalog=" +
+            std::to_string(g_catalog.daily.size()) + "/" + std::to_string(g_catalog.luxury.size()) +
+            "/" + std::to_string(g_catalog.sport.size()) + "/" + std::to_string(g_catalog.exotic.size()) +
+            " zones=" + std::to_string(g_zones.size()) + " model-weights=" +
+            std::to_string(g_modelWeights.size()) + " anti-repeat=" +
+            std::string(config.antiRepeatEnabled ? "ON" : "OFF") + " limit=" +
+            std::to_string(config.repeatLimit) + " radius=" +
             std::to_string(static_cast<int>(config.repeatRadiusMeters)) + "m cooldown=" +
             std::to_string(config.repeatCooldownMs / 1000) + "s.");
     } catch (const std::exception& error) {
-        Log(std::string("Configuracao invalida; plugin desabilitado em fail-open: ") + error.what());
+        Log(std::string("Catalog error; plugin disabled in fail-open: ") + error.what());
         g_runtimeEnabled = false;
         g_configValid = false;
     }
@@ -398,8 +533,31 @@ void ScriptMain() {
         while (true) {
             if (g_toggleRequested.exchange(false)) {
                 g_runtimeEnabled = !g_runtimeEnabled;
-                Log(std::string("Alternado por tecla: ") + (g_runtimeEnabled ? "ON" : "OFF"));
+                Log(std::string("Toggled by key: ") + (g_runtimeEnabled ? "ON" : "OFF"));
                 if (!g_runtimeEnabled) ReleaseAll("F10/fail-open");
+                nextPoll = 0;
+            }
+
+            if (g_reloadRequested.exchange(false)) {
+                // Reload everything first; keep the running config if any part is invalid.
+                try {
+                    RuntimeConfig reloaded = LoadConfig(iniPath);
+                    ZoneTable zones = LoadZones(iniPath);
+                    ModelWeights weights = LoadModelWeights(iniPath);
+                    if (reloaded.maxRepeatCooldownModels != config.maxRepeatCooldownModels) {
+                        g_repeatCooldowns = std::make_unique<RepeatCooldowns>(reloaded.maxRepeatCooldownModels);
+                    }
+                    config = reloaded;
+                    g_zones = std::move(zones);
+                    g_modelWeights = std::move(weights);
+                    g_toggleKey = config.toggleKey;
+                    g_reloadKey = config.reloadKey;
+                    g_rolledZone.clear();
+                    Log("INI reloaded: zones=" + std::to_string(g_zones.size()) + " model-weights=" +
+                        std::to_string(g_modelWeights.size()));
+                } catch (const std::exception& error) {
+                    Log(std::string("INI reload failed, keeping previous settings: ") + error.what());
+                }
                 nextPoll = 0;
             }
 
@@ -409,14 +567,14 @@ void ScriptMain() {
             nextPoll = now + config.zonePollMs;
 
             if (!g_runtimeEnabled || NETWORK::NETWORK_IS_SESSION_ACTIVE()) {
-                ReleaseAll(NETWORK::NETWORK_IS_SESSION_ACTIVE() ? "Online/fail-open" : "Desabilitado/fail-open");
+                ReleaseAll(NETWORK::NETWORK_IS_SESSION_ACTIVE() ? "Online/fail-open" : "Disabled/fail-open");
                 WAIT(0);
                 continue;
             }
 
             const Ped player = PLAYER::PLAYER_PED_ID();
             if (!ENTITY::DOES_ENTITY_EXIST(player)) {
-                ReleaseAll("Jogador indisponivel/fail-open");
+                ReleaseAll("Player unavailable/fail-open");
                 WAIT(0);
                 continue;
             }
@@ -424,22 +582,21 @@ void ScriptMain() {
             const Vector3 position = ENTITY::GET_ENTITY_COORDS(player, TRUE);
             const char* rawZone = ZONE::GET_NAME_OF_ZONE(position.x, position.y, position.z);
             const std::string zone = rawZone ? rawZone : "";
-            const bool controlled = IsControlledZone(zone);
+            const ZoneProfile* profile = FindZoneProfile(g_zones, zone);
+            const bool controlled = profile != nullptr;
             g_currentZone = zone;
 
             if (controlled) {
-                if (!g_insideZone) {
+                if (!g_insideZone || zone != g_rolledZone || now >= nextSportRotation) {
                     g_insideZone = true;
-                    Log("Entrada em zona 64/20/16: " + zone);
-                    ApplySportRotation(config, zone, now);
-                    nextSportRotation = now + config.sportCycleMs;
-                } else if (now >= nextSportRotation) {
-                    ApplySportRotation(config, zone, now);
+                    g_rolledZone = zone;
+                    ApplyRoll(config, *profile, zone, now);
                     nextSportRotation = now + config.sportCycleMs;
                 }
             } else if (g_insideZone) {
-                Log("Saida da zona 64/20/16: " + zone + "; mantendo somente anti-repeat global.");
+                Log("Left controlled zone, now in " + zone + "; keeping anti-repeat only.");
                 g_insideZone = false;
+                g_rolledZone.clear();
                 g_selection = {};
                 ReconcileSuppressions(false, now);
             }
@@ -455,11 +612,11 @@ void ScriptMain() {
             WAIT(0);
         }
     } catch (const std::exception& error) {
-        Log(std::string("Excecao capturada; liberando em fail-open: ") + error.what());
-        ReleaseAll("Excecao/fail-open");
+        Log(std::string("Exception caught; releasing in fail-open: ") + error.what());
+        ReleaseAll("Exception/fail-open");
     } catch (...) {
-        Log("Excecao desconhecida; liberando em fail-open.");
-        ReleaseAll("Excecao desconhecida/fail-open");
+        Log("Unknown exception; releasing in fail-open.");
+        ReleaseAll("Unknown exception/fail-open");
     }
     while (true) WAIT(1000);
 }

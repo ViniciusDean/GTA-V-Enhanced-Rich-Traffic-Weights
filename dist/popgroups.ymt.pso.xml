@@ -9030,6 +9030,102 @@
      <Name>comet3</Name>
      <Variations />
     </Item>
+    <Item>
+     <Name>tampa4</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>clique2</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>impaler5</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>impaler6</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>vigero3</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>terminus</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>caracara3</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>warden</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>broadway</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>brigham</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>coquette6</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>jester5</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>horus</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>pipistrello</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>fmj2</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>eurosx32</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>coureur</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>stingertt</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>panthere</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>everon2</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>gauntlet6</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>uranus</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>dominator9</Name>
+     <Variations />
+    </Item>
+    <Item>
+     <Name>dominator10</Name>
+     <Variations />
+    </Item>
    </models>
    <flags>POPGROUP_AMBIENT POPGROUP_SCENARIO</flags>
   </Item>
