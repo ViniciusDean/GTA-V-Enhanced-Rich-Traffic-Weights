@@ -1,6 +1,7 @@
 #include "Policy.h"
 #include "ModelCatalog.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <random>
@@ -75,6 +76,22 @@ int main() {
     }
     Require(boosted > 900 && boosted < 1100, "peso 2 dobra a chance (0.25 -> 0.5)");
 
+    ModelWeights banWeights;
+    banWeights[HashModelName("adder")] = 0.0f;      // fora do catalogo: banido no mapa todo
+    banWeights[HashModelName("t20")] = 0.5f;        // so mais raro, nao banido
+    const auto bans = BuildBanList(true, banWeights);
+    Require(bans.size() == kDriftModels.size() + 1, "drift + peso 0 banidos");
+    Require(bans.count(HashModelName("driftdominator9")) == 1, "Dominator GT de drift banido");
+    Require(bans.count(HashModelName("adder")) == 1 && bans.count(HashModelName("t20")) == 0,
+            "so peso 0 vira banimento");
+    Require(BuildBanList(false, {}).empty(), "BanDriftVariants=false nao bane nada");
+    for (const auto name : kDriftModels) {
+        const ModelHash model = HashModelName(name);
+        for (const auto* group : {&catalog.daily, &catalog.luxury, &catalog.sport, &catalog.exotic}) {
+            Require(std::find(group->begin(), group->end(), model) == group->end(), "drift fora do catalogo");
+        }
+    }
+
     Require(ClampProbability(2.0f) == 1.0f && ClampProbability(-1.0f) == 0.0f, "clamp de probabilidade");
     const ZoneProfile night = ScaleFastTiers({1.0f, 1.0f, 0.4f, 0.1f}, 1.5f);
     Require(night.sport > 0.59f && night.exotic > 0.149f && night.daily == 1.0f, "reforco noturno so nos tiers rapidos");
@@ -121,6 +138,6 @@ int main() {
         Require(!IsPassengerClass(vehicleClass), "classe de frota ou nao rodoviaria excluida");
     }
 
-    std::cout << "PASS: catalogo=116/38/68/44 pesos por zona e por modelo, reforco noturno, anti-repeat=classes0-7,9\n";
+    std::cout << "PASS: catalogo=116/38/68/44 pesos por zona e por modelo, reforco noturno, drift banido, anti-repeat=classes0-7,9\n";
     return 0;
 }

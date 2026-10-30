@@ -129,6 +129,11 @@ This is an unofficial fan-made mod. It is not affiliated with or endorsed by Roc
 Mod de tráfego para GTA V Enhanced em Story Mode offline. Ele amplia a variedade de veículos DLC, mantém carros cotidianos predominantes, controla esportivos por rotação e bloqueia temporariamente novos spawns de modelos que começam a se repetir perto do jogador. A instalação pronta está na seção [Releases](../../releases).
 
 
+## v1.4.1
+
+- Fix: drift-tuned variants (driftdominator9, drifthardy, driftrt3000, ...) were in the traffic groups since v1.2 and slid around instead of driving. They are removed from `popgroups.ymt` and the plugin now suppresses all 27 known drift variants everywhere (`BanDriftVariants=true`).
+- A model weighted `0` in `[Models]` is now banned on the whole map, including cars outside the mod's catalog.
+
 ## v1.4.0
 
 - New Exotic tier: 44 supercars and hypercars split from Sport (now 68), with their own lower chance per zone.

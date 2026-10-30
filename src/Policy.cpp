@@ -184,6 +184,17 @@ Selection BuildWeightedSelection(const Catalog& catalog, const ZoneProfile& prof
     return result;
 }
 
+std::unordered_set<ModelHash> BuildBanList(bool banDriftVariants, const ModelWeights& weights) {
+    std::unordered_set<ModelHash> banned;
+    if (banDriftVariants) {
+        for (const auto name : kDriftModels) banned.insert(HashModelName(name));
+    }
+    for (const auto& weight : weights) {
+        if (weight.second <= 0.0f) banned.insert(weight.first);
+    }
+    return banned;
+}
+
 std::vector<RepeatObservation> SelectRepeatCandidates(
     std::vector<RepeatObservation> observations, std::size_t repeatLimit,
     std::size_t maxModels) {

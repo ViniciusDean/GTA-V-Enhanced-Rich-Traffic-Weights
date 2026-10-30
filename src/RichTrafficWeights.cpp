@@ -35,6 +35,7 @@ struct RuntimeConfig {
     int nightEndHour = 5;
     float rainFastMultiplier = 0.5f;
     DWORD reloadKey = VK_F11;
+    bool banDriftVariants = true;
     bool antiRepeatEnabled = true;
     DWORD repeatScanMs = 5000;
     float repeatRadiusMeters = 180.0f;
@@ -53,6 +54,8 @@ DWORD g_toggleKey = VK_F10;
 std::atomic<bool> g_reloadRequested{false};
 DWORD g_reloadKey = VK_F11;
 ModelWeights g_modelWeights;
+std::unordered_set<ModelHash> g_banned;
+bool g_bansDirty = true;
 ZoneProfile g_lastProfile{};
 std::filesystem::path g_directory;
 std::filesystem::path g_logPath;
@@ -60,7 +63,7 @@ Catalog g_catalog;
 std::mt19937 g_random{std::random_device{}()};
 ZoneTable g_zones;
 std::string g_rolledZone;
-constexpr const char* kVersion = "1.4.0";
+constexpr const char* kVersion = "1.4.1";
 Selection g_selection;
 std::unordered_map<ModelHash, std::string> g_modelNames;
 std::unordered_map<ModelHash, bool> g_suppressionState;
@@ -177,6 +180,7 @@ RuntimeConfig LoadConfig(const std::filesystem::path& iniPath) {
     config.toggleKey = ParseKey(iniPath, "ToggleKey", "F10", false);
     config.reloadKey = ParseKey(iniPath, "ReloadKey", "F11", true);
     config.rainFastMultiplier = ReadFloat(iniPath, "RainFastMultiplier", 0.5f);
+    config.banDriftVariants = ReadBool(iniPath, "BanDriftVariants", true);
     config.debugOverlay = ReadBool(iniPath, "DebugOverlay", false);
     config.debugTelemetry = ReadBool(iniPath, "DebugTelemetry", false);
     config.logAntiRepeat = ReadBool(iniPath, "LogAntiRepeat", true);
@@ -292,6 +296,7 @@ void ReconcileSuppressions(bool controlled, ULONGLONG now) {
     for (const auto* group : {&g_catalog.daily, &g_catalog.luxury, &g_catalog.sport, &g_catalog.exotic}) {
         models.insert(group->begin(), group->end());
     }
+    models.insert(g_banned.begin(), g_banned.end());
     for (const auto& state : g_suppressionState) models.insert(state.first);
     if (g_repeatCooldowns) {
         for (const auto& cooldown : g_repeatCooldowns->Entries()) models.insert(cooldown.first);
@@ -300,7 +305,8 @@ void ReconcileSuppressions(bool controlled, ULONGLONG now) {
     for (const ModelHash model : models) {
         const bool categorySuppressed = controlled && IsRichCatalogModel(model) && g_selection.active.count(model) == 0;
         const bool repeatSuppressed = g_repeatCooldowns && g_repeatCooldowns->IsActive(model, now);
-        SetSuppressed(model, categorySuppressed || repeatSuppressed);
+        const bool banned = g_banned.count(model) != 0;
+        SetSuppressed(model, categorySuppressed || repeatSuppressed || banned);
     }
 }
 
@@ -319,6 +325,8 @@ void ReleaseAll(const std::string& reason) {
     g_selection = {};
     g_insideZone = false;
     g_currentZone.clear();
+    g_rolledZone.clear();
+    g_bansDirty = true;
 }
 
 void ApplyRoll(const RuntimeConfig& config, const ZoneProfile& base, const std::string& zone,
@@ -510,11 +518,13 @@ void ScriptMain() {
         g_runtimeEnabled = config.enabled;
         g_toggleKey = config.toggleKey;
         g_reloadKey = config.reloadKey;
+        g_banned = BuildBanList(config.banDriftVariants, g_modelWeights);
         Log("Initialized v" + std::string(kVersion) + "; catalog=" +
             std::to_string(g_catalog.daily.size()) + "/" + std::to_string(g_catalog.luxury.size()) +
             "/" + std::to_string(g_catalog.sport.size()) + "/" + std::to_string(g_catalog.exotic.size()) +
             " zones=" + std::to_string(g_zones.size()) + " model-weights=" +
-            std::to_string(g_modelWeights.size()) + " anti-repeat=" +
+            std::to_string(g_modelWeights.size()) + " banned=" +
+            std::to_string(g_banned.size()) + " anti-repeat=" +
             std::string(config.antiRepeatEnabled ? "ON" : "OFF") + " limit=" +
             std::to_string(config.repeatLimit) + " radius=" +
             std::to_string(static_cast<int>(config.repeatRadiusMeters)) + "m cooldown=" +
@@ -552,9 +562,11 @@ void ScriptMain() {
                     g_modelWeights = std::move(weights);
                     g_toggleKey = config.toggleKey;
                     g_reloadKey = config.reloadKey;
+                    g_banned = BuildBanList(config.banDriftVariants, g_modelWeights);
                     g_rolledZone.clear();
+                    g_bansDirty = true;
                     Log("INI reloaded: zones=" + std::to_string(g_zones.size()) + " model-weights=" +
-                        std::to_string(g_modelWeights.size()));
+                        std::to_string(g_modelWeights.size()) + " banned=" + std::to_string(g_banned.size()));
                 } catch (const std::exception& error) {
                     Log(std::string("INI reload failed, keeping previous settings: ") + error.what());
                 }
@@ -599,6 +611,12 @@ void ScriptMain() {
                 g_rolledZone.clear();
                 g_selection = {};
                 ReconcileSuppressions(false, now);
+            }
+
+            // Global bans apply everywhere, so push them once after start, reload or re-enable.
+            if (g_bansDirty) {
+                g_bansDirty = false;
+                ReconcileSuppressions(g_insideZone, now);
             }
 
             if (config.antiRepeatEnabled && now >= nextRepeatScan) {

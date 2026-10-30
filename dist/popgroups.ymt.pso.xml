@@ -7290,30 +7290,6 @@
      <Name>uranus</Name>
      <Variations />
     </Item>
-    <Item>
-     <Name>driftdominator9</Name>
-     <Variations />
-    </Item>
-    <Item>
-     <Name>driftkeitora</Name>
-     <Variations />
-    </Item>
-    <Item>
-     <Name>driftrt3000</Name>
-     <Variations />
-    </Item>
-    <Item>
-     <Name>driftsentinel2</Name>
-     <Variations />
-    </Item>
-    <Item>
-     <Name>driftchavosv6</Name>
-     <Variations />
-    </Item>
-    <Item>
-     <Name>drifthardy</Name>
-     <Variations />
-    </Item>
    </models>
    <flags>POPGROUP_AMBIENT POPGROUP_SCENARIO POPGROUP_NETWORK_COMMON</flags>
   </Item>
@@ -8030,30 +8006,6 @@
     </Item>
     <Item>
      <Name>uranus</Name>
-     <Variations />
-    </Item>
-    <Item>
-     <Name>driftdominator9</Name>
-     <Variations />
-    </Item>
-    <Item>
-     <Name>driftkeitora</Name>
-     <Variations />
-    </Item>
-    <Item>
-     <Name>driftrt3000</Name>
-     <Variations />
-    </Item>
-    <Item>
-     <Name>driftsentinel2</Name>
-     <Variations />
-    </Item>
-    <Item>
-     <Name>driftchavosv6</Name>
-     <Variations />
-    </Item>
-    <Item>
-     <Name>drifthardy</Name>
      <Variations />
     </Item>
    </models>

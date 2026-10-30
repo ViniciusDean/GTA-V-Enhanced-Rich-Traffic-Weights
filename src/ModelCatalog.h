@@ -57,6 +57,16 @@ inline constexpr std::array<std::string_view, 44> kExoticModels = {
     "autarch", "prototipo", "banshee2", "horus", "pipistrello", "fmj2"
 };
 
+// Drift-tuned variants handle like they are on ice; never let them spawn as traffic.
+inline constexpr std::array<std::string_view, 27> kDriftModels = {
+    "driftchavosv6", "driftcheburek", "driftcoquette", "driftcypher",
+    "driftdominator8", "driftdominator9", "driftdominator10", "drifteuros",
+    "driftelegy", "driftfr36", "driftfuto", "driftfuto2", "driftgauntlet4",
+    "drifthardy", "driftjester", "driftjester3", "driftkeitora", "driftl352",
+    "driftnebula", "driftremus", "driftrt3000", "driftsentinel", "driftsentinel2",
+    "drifttampa", "driftvorschlag", "driftyosemite", "driftzr350"
+};
+
 // Default per-zone probability that each model of a tier is allowed to spawn
 // (1.0 = every model, 0.0 = none). Overridable via [Zone.NAME] in the INI.
 struct DefaultZone {

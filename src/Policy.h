@@ -76,6 +76,9 @@ ZoneTable BuildDefaultZones();
 const ZoneProfile* FindZoneProfile(const ZoneTable& zones, std::string_view zone);
 Selection BuildWeightedSelection(const Catalog& catalog, const ZoneProfile& profile,
                                  const ModelWeights& weights, std::mt19937& random);
+// Models that are suppressed everywhere: drift variants (optional) plus every
+// model weighted to 0 in [Models], catalog or not.
+std::unordered_set<ModelHash> BuildBanList(bool banDriftVariants, const ModelWeights& weights);
 std::vector<RepeatObservation> SelectRepeatCandidates(
     std::vector<RepeatObservation> observations, std::size_t repeatLimit,
     std::size_t maxModels);
